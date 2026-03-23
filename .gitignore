@@ -1,0 +1,53 @@
+# ============================================================
+# 22B Strategy Engine — .gitignore
+# ============================================================
+
+# Claude Code local settings — 올리면 안 됨
+.claude/
+
+# Environment / secrets — 절대 올리면 안 됨
+.env
+.env.*
+*.env
+
+# Database — 실거래 데이터 포함
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env_backup
+
+# Logs
+*.log
+logs/
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.suo
+*.user
+
+# Windows local paths / task files
+*.bat.local
+start_silent.vbs
+
+# Jupyter
+.ipynb_checkpoints/

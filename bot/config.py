@@ -1,0 +1,155 @@
+"""
+Configuration loader for the 22B Strategy Engine.
+All settings are read from environment variables (loaded from .env).
+"""
+
+import os
+import logging
+from dataclasses import dataclass, field
+from typing import List
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+
+def _get(key: str, default: str = "") -> str:
+    return os.environ.get(key, default).strip()
+
+
+def _get_bool(key: str, default: bool = False) -> bool:
+    val = _get(key, str(default)).lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _get_int(key: str, default: int = 0) -> int:
+    try:
+        return int(_get(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _get_float(key: str, default: float = 0.0) -> float:
+    try:
+        return float(_get(key, str(default)))
+    except ValueError:
+        return default
+
+
+def _get_list(key: str, default: str = "") -> List[str]:
+    raw = _get(key, default)
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+# --------------------------------------------------------------------------- #
+# Config dataclass
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class Config:
+    # Binance Testnet
+    binance_api_key: str = field(default_factory=lambda: _get("BINANCE_API_KEY"))
+    binance_api_secret: str = field(default_factory=lambda: _get("BINANCE_API_SECRET"))
+    binance_testnet: bool = field(default_factory=lambda: _get_bool("BINANCE_TESTNET", True))
+
+    # Binance Mainnet (실전매매 — BINANCE_TESTNET=false 시 자동 사용)
+    binance_mainnet_api_key: str = field(default_factory=lambda: _get("BINANCE_MAINNET_API_KEY"))
+    binance_mainnet_api_secret: str = field(default_factory=lambda: _get("BINANCE_MAINNET_API_SECRET"))
+
+    # Hyperliquid
+    hyperliquid_wallet_address: str = field(default_factory=lambda: _get("HYPERLIQUID_WALLET_ADDRESS"))
+    hyperliquid_private_key: str = field(default_factory=lambda: _get("HYPERLIQUID_PRIVATE_KEY"))
+    hyperliquid_enabled: bool = field(default_factory=lambda: _get_bool("HYPERLIQUID_ENABLED", False))
+
+    # Telegram
+    telegram_bot_token: str = field(default_factory=lambda: _get("TELEGRAM_BOT_TOKEN"))
+    telegram_chat_id: str = field(default_factory=lambda: _get("TELEGRAM_CHAT_ID"))
+
+    # Dashboard
+    dashboard_host: str = field(default_factory=lambda: _get("DASHBOARD_HOST", "0.0.0.0"))
+    dashboard_port: int = field(default_factory=lambda: _get_int("DASHBOARD_PORT", 8000))
+    dashboard_secret_key: str = field(
+        default_factory=lambda: _get("DASHBOARD_SECRET_KEY", "changeme")
+    )
+
+    # Database
+    db_path: str = field(default_factory=lambda: _get("DB_PATH", "./data/trading.db"))
+
+    # System
+    system_mode: str = field(default_factory=lambda: _get("SYSTEM_MODE", "OBSERVE"))
+    log_level: str = field(default_factory=lambda: _get("LOG_LEVEL", "INFO"))
+
+    # OpenClaw AI (Phase 4)
+    openclaw_base_url: str = field(default_factory=lambda: _get("OPENCLAW_BASE_URL", "http://127.0.0.1:18789"))
+    openclaw_token: str    = field(default_factory=lambda: _get("OPENCLAW_TOKEN", ""))
+    openclaw_agent_id: str = field(default_factory=lambda: _get("OPENCLAW_AGENT_ID", "main"))
+    weekly_review_day: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_DAY", 6))   # 0=Mon, 6=Sun
+    weekly_review_hour: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_HOUR", 0))  # UTC
+    daily_review_hour: int = field(default_factory=lambda: _get_int("DAILY_REVIEW_HOUR", 22))   # UTC
+    ai_enabled: bool = field(default_factory=lambda: _get_bool("AI_ENABLED", True))
+
+    # Symbols
+    tracked_symbols: List[str] = field(
+        default_factory=lambda: _get_list("TRACKED_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT")
+    )
+
+    # Data collection
+    candle_intervals: List[str] = field(
+        default_factory=lambda: _get_list("CANDLE_INTERVALS", "1h,4h")
+    )
+    ticker_update_interval_sec: int = field(
+        default_factory=lambda: _get_int("TICKER_UPDATE_INTERVAL_SEC", 5)
+    )
+    candle_limit: int = field(default_factory=lambda: _get_int("CANDLE_LIMIT", 200))
+
+    # Binance base URLs
+    @property
+    def binance_rest_base(self) -> str:
+        if self.binance_testnet:
+            return "https://testnet.binancefuture.com"
+        return "https://fapi.binance.com"
+
+    @property
+    def binance_ws_base(self) -> str:
+        if self.binance_testnet:
+            return "wss://stream.binancefuture.com"
+        return "wss://fstream.binance.com"
+
+    @property
+    def active_binance_api_key(self) -> str:
+        """Returns mainnet key when testnet=false, testnet key otherwise."""
+        if not self.binance_testnet and self.binance_mainnet_api_key:
+            return self.binance_mainnet_api_key
+        return self.binance_api_key
+
+    @property
+    def active_binance_api_secret(self) -> str:
+        if not self.binance_testnet and self.binance_mainnet_api_secret:
+            return self.binance_mainnet_api_secret
+        return self.binance_api_secret
+
+    def validate(self) -> None:
+        """Log warnings for missing critical config values."""
+        if not self.binance_api_key:
+            logger.warning("BINANCE_API_KEY is not set")
+        if not self.telegram_bot_token:
+            logger.warning("TELEGRAM_BOT_TOKEN is not set — Telegram alerts disabled")
+        valid_modes = {"ACTIVE", "LIMITED", "OBSERVE", "BLOCKED"}
+        if self.system_mode not in valid_modes:
+            logger.warning(
+                "SYSTEM_MODE '%s' is not valid; falling back to OBSERVE", self.system_mode
+            )
+            self.system_mode = "OBSERVE"
+
+
+# Singleton instance
+_config: Config | None = None
+
+
+def get_config() -> Config:
+    global _config
+    if _config is None:
+        _config = Config()
+        _config.validate()
+    return _config

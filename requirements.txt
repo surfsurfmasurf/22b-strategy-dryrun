@@ -1,0 +1,28 @@
+# Core async
+asyncio-throttle==1.0.2
+httpx==0.27.0
+websockets==12.0
+
+# Web framework / dashboard
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+jinja2==3.1.4
+python-multipart==0.0.9
+
+# Data / indicators
+pandas==2.2.2
+numpy==1.26.4
+
+# Telegram
+python-telegram-bot==21.3
+
+# Environment
+python-dotenv==1.0.1
+
+# SQLite is built-in to Python 3.x — no extra package needed
+
+# Utilities
+aiofiles==23.2.1
+
+# Phase 4 — AI analysis (Claude)
+openai>=1.30.0
