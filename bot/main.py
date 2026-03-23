@@ -472,10 +472,13 @@ class Engine:
 
     async def _telegram_command_loop(self) -> None:
         """
-        Poll for Telegram updates and handle /kill and /status commands.
-        Runs as a background asyncio task.
+        텔레그램 명령어 처리 루프.
+        지원 명령어: /help /status /kill /reset /mode /balance /regime
+                     /positions /strategies /url /pause /resume /restart
         """
         import httpx
+        import os, subprocess, sys
+
         if not self._telegram._enabled:
             return
 
@@ -492,41 +495,254 @@ class Engine:
                     if resp.status_code == 404:
                         logger.warning("[Telegram] Invalid token (404) — command loop disabled.")
                         return
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        for update in data.get("result", []):
-                            offset = update["update_id"] + 1
-                            msg = update.get("message", {})
-                            text = (msg.get("text") or "").strip().lower()
-                            chat_id = msg.get("chat", {}).get("id")
+                    if resp.status_code != 200:
+                        await asyncio.sleep(5)
+                        continue
 
-                            if text == "/kill":
-                                logger.warning(
-                                    "[Telegram] /kill command received from chat_id=%s", chat_id
-                                )
-                                await self._kill_switch.trigger(
-                                    reason="Manual /kill via Telegram",
-                                    triggered_by=f"telegram:{chat_id}",
-                                )
+                    data = resp.json()
+                    for update in data.get("result", []):
+                        offset = update["update_id"] + 1
+                        msg    = update.get("message", {})
+                        raw    = (msg.get("text") or "").strip()
+                        text   = raw.lower()
+                        chat_id = msg.get("chat", {}).get("id")
+                        parts  = raw.split()          # 원본 대소문자 유지
+
+                        # ── /help ─────────────────────────────────────────
+                        if text in ("/help", "/start"):
+                            await self._telegram.send_message(
+                                "*📋 22B Strategy Engine 명령어 목록*\n\n"
+                                "*상태 조회*\n"
+                                "`/status`  — 전체 시스템 상태\n"
+                                "`/balance` — 잔고 및 오늘/이번 주 손익\n"
+                                "`/regime`  — 현재 시장 국면\n"
+                                "`/positions` — 열린 포지션 현황\n"
+                                "`/strategies` — 전략별 성과\n"
+                                "`/url`     — 모바일 대시보드 URL\n\n"
+                                "*시스템 제어*\n"
+                                "`/kill`    — 🚨 긴급 정지 (신규 진입 전면 차단)\n"
+                                "`/reset`   — Kill Switch 해제\n"
+                                "`/mode`    — 현재 운영 모드 확인\n"
+                                "`/mode observe` — 관찰 모드 (거래 없음)\n"
+                                "`/mode limited` — 페이퍼 트레이딩만\n"
+                                "`/mode active`  — 실전 매매 활성화\n"
+                                "`/pause [전략명]` — 전략 일시정지\n"
+                                "`/resume [전략명]` — 전략 재개\n"
+                                "`/restart` — 봇 재시작"
+                            )
+
+                        # ── /kill ─────────────────────────────────────────
+                        elif text == "/kill":
+                            logger.warning("[Telegram] /kill from chat_id=%s", chat_id)
+                            await self._kill_switch.trigger(
+                                reason="Manual /kill via Telegram",
+                                triggered_by=f"telegram:{chat_id}",
+                            )
+                            await self._telegram.send_message(
+                                "🚨 *Kill Switch 활성화*\n"
+                                "모든 신규 진입이 차단됐습니다.\n"
+                                "기존 포지션은 SL/TP로 보호됩니다.\n"
+                                "해제하려면 `/reset` 을 입력하세요."
+                            )
+
+                        # ── /reset ────────────────────────────────────────
+                        elif text == "/reset":
+                            if self._kill_switch and self._kill_switch.is_active:
+                                self._kill_switch.reset(authorized_by=f"telegram:{chat_id}")
                                 await self._telegram.send_message(
-                                    "*Kill Switch Activated*\nAll new entries BLOCKED.\n"
-                                    "Existing positions protected by SL/TP."
+                                    "✅ *Kill Switch 해제됨*\n"
+                                    "정상 운영으로 복귀합니다."
+                                )
+                            else:
+                                await self._telegram.send_message(
+                                    "ℹ️ Kill Switch가 활성화되어 있지 않습니다."
                                 )
 
-                            elif text == "/status":
-                                ks = self._kill_switch.get_status()
-                                rec = self._reconciler.get_status() if self._reconciler else {}
-                                balance = self._store.get_account_balance()
-                                mode = self._store.get_system_mode()
-                                status_msg = (
-                                    f"*22B Engine Status*\n"
-                                    f"Mode: `{mode}`\n"
-                                    f"Balance: `{balance:.2f} USDT`\n"
-                                    f"Kill Switch: `{'ACTIVE' if ks.get('active') else 'OFF'}`\n"
-                                    f"Last Reconcile: `{rec.get('age_sec', 'N/A')}s ago`\n"
-                                    f"Reconcile errors: `{len(rec.get('errors', []))}`"
+                        # ── /status ───────────────────────────────────────
+                        elif text == "/status":
+                            ks      = self._kill_switch.get_status() if self._kill_switch else {}
+                            rec     = self._reconciler.get_status() if self._reconciler else {}
+                            balance = self._store.get_account_balance()
+                            mode    = self._store.get_system_mode()
+                            uptime  = int(time.time() - self._start_time)
+                            h, m    = divmod(uptime // 60, 60)
+                            regime  = (self._store.get_regime() or {}).get("regime", "UNKNOWN")
+                            tunnel_url = self._tunnel.url if self._tunnel else None
+
+                            await self._telegram.send_message(
+                                f"*⚙️ 22B Engine 상태*\n\n"
+                                f"운영 모드: `{mode}`\n"
+                                f"시장 국면: `{regime}`\n"
+                                f"잔고: `{balance:.2f} USDT`\n"
+                                f"Kill Switch: `{'🔴 활성' if ks.get('active') else '🟢 해제'}`\n"
+                                f"마지막 대조: `{rec.get('age_sec', 'N/A')}초 전`\n"
+                                f"업타임: `{h}시간 {m}분`\n"
+                                + (f"대시보드: {tunnel_url}" if tunnel_url else "")
+                            )
+
+                        # ── /balance ──────────────────────────────────────
+                        elif text == "/balance":
+                            balance  = self._store.get_account_balance()
+                            dpnl, dp = self._store.get_daily_pnl()
+                            wpnl     = self._store.get_weekly_pnl()
+                            sign_d   = "+" if dpnl >= 0 else ""
+                            sign_w   = "+" if wpnl >= 0 else ""
+                            network  = "테스트넷" if self._config.binance_testnet else "실전"
+                            await self._telegram.send_message(
+                                f"*💰 잔고 현황* ({network})\n\n"
+                                f"잔고: `{balance:.2f} USDT`\n"
+                                f"오늘 손익: `{sign_d}{dpnl:.2f} USDT ({sign_d}{dp:.2f}%)`\n"
+                                f"이번 주 손익: `{sign_w}{wpnl:.2f} USDT`"
+                            )
+
+                        # ── /regime ───────────────────────────────────────
+                        elif text == "/regime":
+                            r = self._store.get_regime() or {}
+                            regime    = r.get("regime", "UNKNOWN")
+                            allowed   = ", ".join(r.get("allowed_strategies", [])) or "없음"
+                            btc_price = r.get("btc_price", "—")
+                            atr_pct   = r.get("btc_atr_pct", "—")
+                            rsi       = r.get("btc_rsi", "—")
+                            await self._telegram.send_message(
+                                f"*🌐 시장 국면*\n\n"
+                                f"현재: `{regime}`\n"
+                                f"활성 전략: `{allowed}`\n"
+                                f"BTC 가격: `{btc_price}`\n"
+                                f"ATR%: `{atr_pct}`\n"
+                                f"RSI(4H): `{rsi}`"
+                            )
+
+                        # ── /positions ────────────────────────────────────
+                        elif text == "/positions":
+                            paper = self._store.get_open_paper_positions()
+                            live  = self._store.get_open_live_positions()
+                            if not paper and not live:
+                                await self._telegram.send_message("📂 현재 열린 포지션이 없습니다.")
+                            else:
+                                lines = ["*📂 열린 포지션*\n"]
+                                for p in live:
+                                    lines.append(
+                                        f"🔴 LIVE `{p.get('symbol')}` {p.get('side')} "
+                                        f"진입가:`{p.get('entry_price','—')}` "
+                                        f"PnL:`{p.get('pnl_pct',0):.2f}%`"
+                                    )
+                                for p in paper:
+                                    lines.append(
+                                        f"📄 PAPER `{p.get('symbol')}` {p.get('side')} "
+                                        f"전략:`{p.get('strategy','—')}`"
+                                    )
+                                await self._telegram.send_message("\n".join(lines))
+
+                        # ── /strategies ───────────────────────────────────
+                        elif text == "/strategies":
+                            strategies = self._strategy_manager.get_strategy_list() if self._strategy_manager else []
+                            stats      = self._store.get_strategy_stats()
+                            if not strategies:
+                                await self._telegram.send_message("전략 정보 없음")
+                            else:
+                                lines = ["*🧠 전략 성과*\n"]
+                                for s in strategies:
+                                    name = s["name"]
+                                    st   = stats.get(name, {})
+                                    mode = s.get("mode", "—")
+                                    wr   = st.get("win_rate", 0)
+                                    cnt  = st.get("trade_count", 0)
+                                    lines.append(
+                                        f"`{name}` [{mode}]\n"
+                                        f"  승률: {wr:.1f}% | 거래: {cnt}회"
+                                    )
+                                await self._telegram.send_message("\n".join(lines))
+
+                        # ── /url ──────────────────────────────────────────
+                        elif text == "/url":
+                            url = self._tunnel.url if self._tunnel else None
+                            if url:
+                                await self._telegram.send_message(
+                                    f"*📱 대시보드 URL*\n`{url}`"
                                 )
-                                await self._telegram.send_message(status_msg)
+                            else:
+                                await self._telegram.send_message(
+                                    "터널이 비활성화 상태입니다.\n"
+                                    "(.env 에서 TUNNEL\\_ENABLED=true 로 설정 후 재시작)"
+                                )
+
+                        # ── /mode [값] ────────────────────────────────────
+                        elif text.startswith("/mode"):
+                            valid = {"observe", "limited", "active", "blocked"}
+                            if len(parts) == 1:
+                                current = self._store.get_system_mode()
+                                await self._telegram.send_message(
+                                    f"현재 모드: `{current}`\n\n"
+                                    "변경: `/mode observe|limited|active|blocked`\n"
+                                    "• `observe` — 관찰만 (거래 없음)\n"
+                                    "• `limited` — 페이퍼 트레이딩만\n"
+                                    "• `active`  — 실전 매매 활성\n"
+                                    "• `blocked` — 전체 차단"
+                                )
+                            elif len(parts) == 2 and parts[1].lower() in valid:
+                                new_mode = parts[1].upper()
+                                self._config.system_mode = new_mode
+                                self._store.set_system_mode(new_mode)
+                                logger.warning("[Telegram] Mode changed to %s by chat_id=%s", new_mode, chat_id)
+                                await self._telegram.send_message(
+                                    f"✅ 운영 모드 변경: `{new_mode}`"
+                                )
+                            else:
+                                await self._telegram.send_message(
+                                    "❌ 잘못된 모드입니다.\n`/mode observe|limited|active|blocked`"
+                                )
+
+                        # ── /pause [전략명] ───────────────────────────────
+                        elif text.startswith("/pause"):
+                            if self._strategy_manager is None:
+                                await self._telegram.send_message("전략 관리자가 초기화되지 않았습니다.")
+                            elif len(parts) < 2:
+                                names = [s["name"] for s in self._strategy_manager.get_strategy_list()]
+                                await self._telegram.send_message(
+                                    f"사용법: `/pause [전략명]`\n전략 목록: `{'`, `'.join(names)}`"
+                                )
+                            else:
+                                name = parts[1]
+                                ok = self._strategy_manager.set_strategy_mode(name, "PAUSED")
+                                if ok:
+                                    await self._telegram.send_message(f"⏸ `{name}` 전략 일시정지됨")
+                                else:
+                                    await self._telegram.send_message(f"❌ 전략 `{name}` 을 찾을 수 없습니다.")
+
+                        # ── /resume [전략명] ──────────────────────────────
+                        elif text.startswith("/resume"):
+                            if self._strategy_manager is None:
+                                await self._telegram.send_message("전략 관리자가 초기화되지 않았습니다.")
+                            elif len(parts) < 2:
+                                names = [s["name"] for s in self._strategy_manager.get_strategy_list()]
+                                await self._telegram.send_message(
+                                    f"사용법: `/resume [전략명]`\n전략 목록: `{'`, `'.join(names)}`"
+                                )
+                            else:
+                                name = parts[1]
+                                ok = self._strategy_manager.set_strategy_mode(name, "PAPER")
+                                if ok:
+                                    await self._telegram.send_message(f"▶️ `{name}` 전략 재개 (PAPER 모드)")
+                                else:
+                                    await self._telegram.send_message(f"❌ 전략 `{name}` 을 찾을 수 없습니다.")
+
+                        # ── /restart ──────────────────────────────────────
+                        elif text == "/restart":
+                            await self._telegram.send_message(
+                                "🔄 *봇을 재시작합니다...*\n약 10초 후 다시 시작됩니다."
+                            )
+                            logger.warning("[Telegram] Restart requested by chat_id=%s", chat_id)
+                            base_dir = str(__import__("pathlib").Path(__file__).parent.parent)
+                            def _do_restart():
+                                time.sleep(2)
+                                subprocess.Popen(
+                                    [sys.executable, "-m", "bot.main"],
+                                    cwd=base_dir,
+                                    creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                                )
+                                time.sleep(0.5)
+                                os._exit(0)
+                            __import__("threading").Thread(target=_do_restart, daemon=True).start()
 
                 except asyncio.CancelledError:
                     break
