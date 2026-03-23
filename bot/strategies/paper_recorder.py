@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 if TYPE_CHECKING:
     from bot.data.store import DataStore
+    from bot.data.replay_account import ReplayAccount
     from bot.strategies._base import Signal
 
 logger = logging.getLogger(__name__)
@@ -92,10 +93,27 @@ class PaperRecorder:
     stats = recorder.get_strategy_stats()
     """
 
-    def __init__(self, store: "DataStore") -> None:
+    def __init__(
+        self,
+        store: "DataStore",
+        replay_account: Optional["ReplayAccount"] = None,
+    ) -> None:
         self._store = store
+        self._replay_account = replay_account
         # In-memory open positions: id -> PaperPosition
         self._open: Dict[str, PaperPosition] = {}
+        # Replay clock: set by replay loop to use candle ts instead of wall-clock
+        self._replay_ts_ms: Optional[int] = None
+
+    def set_replay_ts(self, ts_ms: int) -> None:
+        """Inject current candle timestamp for replay mode (avoids wall-clock usage)."""
+        self._replay_ts_ms = ts_ms
+
+    def _now_ms(self) -> int:
+        """Return current time in ms — candle ts during replay, wall-clock otherwise."""
+        if self._replay_ts_ms is not None:
+            return self._replay_ts_ms
+        return int(time.time() * 1000)
 
     # ---------------------------------------------------------------------- #
     # Signal intake
@@ -241,6 +259,8 @@ class PaperRecorder:
             else:
                 sl = round(entry_price * (1 + DEFAULT_SL_PCT), 8)
 
+        now_ms = self._now_ms()
+
         pos = PaperPosition(
             id=str(uuid.uuid4()),
             strategy=signal.strategy,
@@ -250,11 +270,22 @@ class PaperRecorder:
             qty=1.0,
             tp=tp,
             sl=sl,
-            opened_at=int(time.time() * 1000),
+            opened_at=now_ms,
             regime=signal.regime,
             signal_id=signal.id,
         )
         self._open[pos.id] = pos
+
+        # Virtual account: allocate capital for this position
+        if self._replay_account is not None:
+            self._replay_account.open_position(
+                position_id=pos.id,
+                strategy=pos.strategy,
+                symbol=pos.symbol,
+                side=pos.side,
+                entry_price=entry_price,
+                opened_at_ms=now_ms,
+            )
 
         # Persist to SQLite
         self._store.save_paper_position(pos.to_dict())
@@ -276,11 +307,24 @@ class PaperRecorder:
         else:  # SHORT
             pnl_pct = (pos.entry_price - exit_price) / pos.entry_price * 100
 
+        now_ms = self._now_ms()
         pos.status = "CLOSED"
-        pos.closed_at = int(time.time() * 1000)
+        pos.closed_at = now_ms
         pos.exit_price = exit_price
-        pos.pnl_pct = round(pnl_pct, 4)
         pos.close_reason = reason
+
+        # Virtual account: settle PnL (fee + slippage applied inside account)
+        if self._replay_account is not None:
+            trade = self._replay_account.close_position(
+                position_id=pos.id,
+                exit_price=exit_price,
+                closed_at_ms=now_ms,
+                close_reason=reason,
+            )
+            # Use net pnl_pct from account (includes fees/slippage)
+            pos.pnl_pct = trade.pnl_pct if trade is not None else round(pnl_pct, 4)
+        else:
+            pos.pnl_pct = round(pnl_pct, 4)
 
         # Remove from open dict
         self._open.pop(pos.id, None)

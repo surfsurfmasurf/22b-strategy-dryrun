@@ -111,6 +111,12 @@ class Config:
     daily_review_hour: int = field(default_factory=lambda: _get_int("DAILY_REVIEW_HOUR", 22))
     ai_enabled: bool = field(default_factory=lambda: _get_bool("AI_ENABLED", True))
 
+    # Replay simulation (backtest)
+    replay_initial_balance: float = field(default_factory=lambda: _get_float("REPLAY_INITIAL_BALANCE", 10_000.0))
+    replay_position_size_pct: float = field(default_factory=lambda: _get_float("REPLAY_POSITION_SIZE_PCT", 0.10))
+    replay_fee_rate: float = field(default_factory=lambda: _get_float("REPLAY_FEE_RATE", 0.0004))
+    replay_slippage_pct: float = field(default_factory=lambda: _get_float("REPLAY_SLIPPAGE_PCT", 0.0005))
+
     # Symbols
     tracked_symbols: List[str] = field(
         default_factory=lambda: _get_list("TRACKED_SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT")

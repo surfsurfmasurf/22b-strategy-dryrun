@@ -651,6 +651,39 @@ def create_app(
         return JSONResponse({"status": "restarting", "message": "Bot will restart in ~2s"})
 
     # ------------------------------------------------------------------ #
+    # Backtest report
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/backtest-report")
+    async def api_backtest_report():
+        """Return the latest saved backtest report, or the live replay account metrics."""
+        # 1) If engine has a live replay_account, return live metrics
+        if engine is not None and hasattr(engine, "_replay_account") and engine._replay_account is not None:
+            try:
+                metrics = engine._replay_account.compute_metrics()
+                return JSONResponse({
+                    "source": "live_replay",
+                    "metrics": metrics,
+                    "equity_curve": [
+                        {"ts_ms": ts, "balance": round(bal, 4)}
+                        for ts, bal in engine._replay_account.equity_curve
+                    ],
+                })
+            except Exception as exc:
+                logger.warning("[Dashboard] Live replay metrics error: %s", exc)
+
+        # 2) Fall back to latest saved JSON report
+        try:
+            from bot.ai.backtest_reporter import load_latest_report
+            report = load_latest_report()
+            if report:
+                return JSONResponse({"source": "saved_report", **report})
+        except Exception as exc:
+            logger.warning("[Dashboard] Backtest report load error: %s", exc)
+
+        return JSONResponse({"source": "none", "metrics": {}, "equity_curve": []})
+
+    # ------------------------------------------------------------------ #
     # Strategy mode management
     # ------------------------------------------------------------------ #
 

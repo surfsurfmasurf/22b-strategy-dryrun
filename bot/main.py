@@ -43,6 +43,7 @@ from bot.data.collector import BinanceCollector
 from bot.data.store import DataStore
 from bot.data.validation_dataset_loader import ValidationDatasetLoader
 from bot.data.validation_replay import ValidationReplaySession
+from bot.data.replay_account import ReplayAccount
 from bot.notifications.telegram import TelegramNotifier
 from bot.regime.detector import RegimeDetector
 from bot.strategies.manager import StrategyManager
@@ -116,6 +117,9 @@ class Engine:
         # Cloudflare Tunnel
         self._tunnel = None
 
+        # Replay simulation account (set when replay is active)
+        self._replay_account: Optional[ReplayAccount] = None
+
         self._running = False
         self._shutdown_event = asyncio.Event()
         self._last_balance_refresh: float = 0.0
@@ -176,6 +180,13 @@ class Engine:
                     step_delay_ms=self._config.validation_replay_step_delay_ms,
                     max_steps=self._config.validation_replay_max_steps,
                 )
+                # Initialize virtual account for replay simulation
+                self._replay_account = ReplayAccount(
+                    initial_balance=self._config.replay_initial_balance,
+                    position_size_pct=self._config.replay_position_size_pct,
+                    fee_rate=self._config.replay_fee_rate,
+                    slippage_pct=self._config.replay_slippage_pct,
+                )
             self._store.set_exchange_status(False)
 
         # 3. Telegram
@@ -199,6 +210,11 @@ class Engine:
             "StrategyManager initialized with %d strategies",
             len(self._strategy_manager.get_strategy_list()),
         )
+
+        # Inject replay_account into PaperRecorder if replay is active
+        if self._replay_account is not None:
+            self._strategy_manager.recorder._replay_account = self._replay_account
+            logger.info("ReplayAccount injected into PaperRecorder.")
 
         # 7. Phase 3: Kill Switch
         self._kill_switch = KillSwitch(self._store, self._telegram)
@@ -361,7 +377,31 @@ class Engine:
                 bar.candle["ts"],
                 bar.candle["c"],
             )
+
+            # Inject candle timestamp into PaperRecorder for replay-accurate timing
+            if self._strategy_manager is not None:
+                self._strategy_manager.recorder.set_replay_ts(bar.candle["ts"])
+
             last_regime = await self._run_engine_cycle(last_regime)
+
+        # Generate backtest report after replay finishes
+        if self._replay_account is not None:
+            try:
+                from bot.ai.backtest_reporter import BacktestReporter
+                reporter = BacktestReporter(
+                    account=self._replay_account,
+                    telegram=self._telegram,
+                )
+                label = f"replay_{replay_session.total_steps()}steps"
+                report = reporter.generate(label=label)
+                logger.info(
+                    "[ValidationReplay] Backtest report: trades=%d  return=%.2f%%  mdd=%.2f%%",
+                    report["metrics"].get("trade_count", 0),
+                    report["metrics"].get("total_return_pct", 0.0),
+                    report["metrics"].get("mdd_pct", 0.0),
+                )
+            except Exception as exc:
+                logger.error("[ValidationReplay] Backtest report generation failed: %s", exc)
 
         await self._shutdown()
 
