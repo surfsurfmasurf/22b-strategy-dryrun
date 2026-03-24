@@ -99,6 +99,13 @@ class OverreactionReversalStrategy(StrategyBase):
         price_cur  = float(close.iloc[-1])
         ema200_cur = float(ema200.iloc[-1])
 
+        # 런타임 파라미터 (params_store 우선, 클래스 상수 폴백)
+        rsi_oversold     = self.get_param("rsi_oversold",     self.RSI_OVERSOLD)
+        rsi_overbought   = self.get_param("rsi_overbought",   self.RSI_OVERBOUGHT)
+        overreaction_pct = self.get_param("overreaction_pct", self.OVERREACTION_PCT)
+        tp_pct           = self.get_param("tp_pct",           self.TP_PCT)
+        sl_pct           = self.get_param("sl_pct",           self.SL_PCT)
+
         if ema200_cur <= 0:
             return None
 
@@ -114,15 +121,15 @@ class OverreactionReversalStrategy(StrategyBase):
 
         # ─── BUY (과매도 되돌림) ─────────────────────────────────────────── #
         if (
-            rsi_cur < self.RSI_OVERSOLD
+            rsi_cur < rsi_oversold
             and rsi_cur > rsi_prev                             # 회복 시작
-            and max_drop <= -self.OVERREACTION_PCT             # 급락 캔들 존재
+            and max_drop <= -overreaction_pct                  # 급락 캔들 존재
             and price_cur > ema200_cur * self.EMA_BAND_LOW     # 너무 깊은 다운트렌드 제외
             and funding <= 0.0001                              # 숏 과열 or 중립
         ):
             confidence = self._clamp(1.0 - rsi_cur / 100.0 + abs(max_drop) * 2, 0.5, 1.0)
-            tp = round(price_cur * (1 + self.TP_PCT), 8)
-            sl = round(price_cur * (1 - self.SL_PCT), 8)
+            tp = round(price_cur * (1 + tp_pct), 8)
+            sl = round(price_cur * (1 - sl_pct), 8)
             return Signal(
                 strategy=self.name, symbol=symbol,
                 action="BUY", mode=self._PHASE2_MODE,
@@ -136,15 +143,15 @@ class OverreactionReversalStrategy(StrategyBase):
 
         # ─── SELL (과매수 되돌림) ────────────────────────────────────────── #
         if (
-            rsi_cur > self.RSI_OVERBOUGHT
+            rsi_cur > rsi_overbought
             and rsi_cur < rsi_prev                             # 하락 시작
-            and max_gain >= self.OVERREACTION_PCT              # 급등 캔들 존재
+            and max_gain >= overreaction_pct                   # 급등 캔들 존재
             and price_cur < ema200_cur * self.EMA_BAND_HIGH
             and funding >= -0.0001                             # 롱 과열 or 중립
         ):
             confidence = self._clamp(rsi_cur / 100.0 + max_gain * 2, 0.5, 1.0)
-            tp = round(price_cur * (1 - self.TP_PCT), 8)
-            sl = round(price_cur * (1 + self.SL_PCT), 8)
+            tp = round(price_cur * (1 - tp_pct), 8)
+            sl = round(price_cur * (1 + sl_pct), 8)
             return Signal(
                 strategy=self.name, symbol=symbol,
                 action="SELL", mode=self._PHASE2_MODE,

@@ -739,6 +739,62 @@ def create_app(
         return JSONResponse({"ok": True, "changed": changed})
 
     # ------------------------------------------------------------------ #
+    # Strategy params (runtime editable)
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/strategy-params")
+    async def api_get_strategy_params():
+        """전략 파라미터 전체 조회 (기본값 + 오버라이드 병합)."""
+        from bot.strategies.params_store import StrategyParamsStore
+        store = StrategyParamsStore.get_instance()
+        return JSONResponse(store.get_all())
+
+    @app.post("/api/strategy-params/global")
+    async def api_post_global_params(request: Request):
+        """글로벌 파라미터 업데이트."""
+        from bot.strategies.params_store import StrategyParamsStore
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        store = StrategyParamsStore.get_instance()
+        store.set_global(body)
+        return JSONResponse({"ok": True, "updated": list(body.keys())})
+
+    @app.post("/api/strategy-params/{strategy_name}")
+    async def api_post_strategy_params(strategy_name: str, request: Request):
+        """개별 전략 파라미터 업데이트."""
+        from bot.strategies.params_store import StrategyParamsStore, DEFAULT_PARAMS
+        if strategy_name not in DEFAULT_PARAMS.get("strategies", {}):
+            raise HTTPException(status_code=404, detail=f"Unknown strategy: {strategy_name}")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        store = StrategyParamsStore.get_instance()
+        store.set_strategy(strategy_name, body)
+        # enabled 변경 시 StrategyManager에도 반영
+        if "enabled" in body and engine is not None:
+            mgr = getattr(engine, "_strategy_manager", None)
+            if mgr is not None:
+                mode = "PAPER" if body["enabled"] else "PAUSED"
+                mgr.set_strategy_mode(strategy_name, mode)
+        return JSONResponse({"ok": True, "strategy": strategy_name, "updated": list(body.keys())})
+
+    @app.post("/api/strategy-params/{strategy_name}/reset")
+    async def api_reset_strategy_params(strategy_name: str):
+        """전략 파라미터를 기본값으로 초기화."""
+        from bot.strategies.params_store import StrategyParamsStore, DEFAULT_PARAMS
+        if strategy_name not in DEFAULT_PARAMS.get("strategies", {}):
+            raise HTTPException(status_code=404, detail=f"Unknown strategy: {strategy_name}")
+        store = StrategyParamsStore.get_instance()
+        with store._lock:
+            if "strategies" in store._params:
+                store._params["strategies"].pop(strategy_name, None)
+            store._save()
+        return JSONResponse({"ok": True, "strategy": strategy_name, "reset": True})
+
+    # ------------------------------------------------------------------ #
     # Backtest report
     # ------------------------------------------------------------------ #
 

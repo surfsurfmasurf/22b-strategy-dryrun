@@ -115,21 +115,29 @@ class EarlyTrendCaptureStrategy(StrategyBase):
 
         price_cur = float(close.iloc[-1])
 
-        # 변동성 과열 필터: ATR이 10봉 평균보다 30% 이상 높으면 제외
-        if atr_avg10 > 0 and atr_cur > atr_avg10 * 1.30:
+        # 런타임 파라미터
+        rsi_low  = self.get_param("rsi_low",  self.RSI_LOW)
+        rsi_high = self.get_param("rsi_high", self.RSI_HIGH)
+        vol_mult = self.get_param("vol_mult", self.VOL_MULT)
+        tp_pct   = self.get_param("tp_pct",   self.TP_PCT)
+        sl_pct   = self.get_param("sl_pct",   self.SL_PCT)
+        atr_mult = self.get_param("atr_mult", 1.30)
+
+        # 변동성 과열 필터: ATR이 10봉 평균보다 atr_mult 배 이상 높으면 제외
+        if atr_avg10 > 0 and atr_cur > atr_avg10 * atr_mult:
             return None
 
         # ─── BUY: 골든 크로스 초기 ───────────────────────────────────────── #
         golden_cross = (ema_fast_prev <= ema_slow_prev) and (ema_fast_cur > ema_slow_cur)
         if (
             golden_cross
-            and self.RSI_LOW <= rsi_cur <= self.RSI_HIGH
+            and rsi_low <= rsi_cur <= rsi_high
             and price_cur > ema_slow_cur
-            and vol_ratio >= self.VOL_MULT
+            and vol_ratio >= vol_mult
         ):
             confidence = self._clamp(0.5 + (rsi_cur - 40) / 40 * 0.4 + (vol_ratio - 1) * 0.1, 0.5, 1.0)
-            tp = round(price_cur * (1 + self.TP_PCT), 8)
-            sl = round(price_cur * (1 - self.SL_PCT), 8)
+            tp = round(price_cur * (1 + tp_pct), 8)
+            sl = round(price_cur * (1 - sl_pct), 8)
             return Signal(
                 strategy=self.name, symbol=symbol,
                 action="BUY", mode=self._PHASE2_MODE,
@@ -145,13 +153,13 @@ class EarlyTrendCaptureStrategy(StrategyBase):
         dead_cross = (ema_fast_prev >= ema_slow_prev) and (ema_fast_cur < ema_slow_cur)
         if (
             dead_cross
-            and self.RSI_LOW <= rsi_cur <= self.RSI_HIGH
+            and rsi_low <= rsi_cur <= rsi_high
             and price_cur < ema_slow_cur
-            and vol_ratio >= self.VOL_MULT
+            and vol_ratio >= vol_mult
         ):
             confidence = self._clamp(0.5 + (60 - rsi_cur) / 40 * 0.4 + (vol_ratio - 1) * 0.1, 0.5, 1.0)
-            tp = round(price_cur * (1 - self.TP_PCT), 8)
-            sl = round(price_cur * (1 + self.SL_PCT), 8)
+            tp = round(price_cur * (1 - tp_pct), 8)
+            sl = round(price_cur * (1 + sl_pct), 8)
             return Signal(
                 strategy=self.name, symbol=symbol,
                 action="SELL", mode=self._PHASE2_MODE,

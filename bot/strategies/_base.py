@@ -172,5 +172,17 @@ class StrategyBase(ABC):
     def _clamp(value: float, lo: float, hi: float) -> float:
         return max(lo, min(hi, value))
 
+    # ---------------------------------------------------------------------- #
+    # Helper: params_store 런타임 파라미터 조회
+    # ---------------------------------------------------------------------- #
+
+    def get_param(self, key: str, default=None):
+        """params_store에서 이 전략의 파라미터를 읽는다. 없으면 default 반환."""
+        try:
+            from bot.strategies.params_store import StrategyParamsStore
+            return StrategyParamsStore.get_instance().get(self.name, key, default)
+        except Exception:
+            return default
+
     def __repr__(self) -> str:
         return f"<Strategy name={self.name!r} category={self.category!r}>"

@@ -49,6 +49,7 @@ from bot.regime.detector import RegimeDetector
 from bot.regime.fast_layer import FastLayer
 from bot.strategies.manager import StrategyManager
 from bot.strategies.approval_manager import ApprovalManager
+from bot.strategies.params_store import StrategyParamsStore
 from bot.execution.kill_switch import KillSwitch
 from bot.execution.state_machine import OrderStateMachine
 from bot.execution.risk_manager import RiskManager
@@ -209,6 +210,8 @@ class Engine:
         self._fast_layer = FastLayer(self._store)
 
         # 6. Strategy Manager (Phase 2) + Approval Manager
+        # params_store 싱글턴 초기화 (data/ 디렉터리 기준)
+        StrategyParamsStore.get_instance()
         self._strategy_manager = StrategyManager(self._store)
         self._strategy_manager.initialize()
         self._approval_manager = ApprovalManager(self._store, self._strategy_manager)

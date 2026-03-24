@@ -1814,6 +1814,236 @@ async function applySetting(body, successMsg) {
 loadSettings();
 setInterval(loadSettings, 15000);
 
+// ============================================================
+// Strategy Params Panel
+// ============================================================
+
+// 전략별 파라미터 메타데이터 (label, type, step, min, max)
+const STRATEGY_PARAM_META = {
+  overreaction_reversal: {
+    enabled:          { label: '활성화', type: 'bool' },
+    tp_pct:           { label: 'TP (%)', type: 'pct', step: 0.001, min: 0.001, max: 0.2 },
+    sl_pct:           { label: 'SL (%)', type: 'pct', step: 0.001, min: 0.001, max: 0.1 },
+    rsi_oversold:     { label: 'RSI 과매도', type: 'num', step: 0.5, min: 10, max: 40 },
+    rsi_overbought:   { label: 'RSI 과매수', type: 'num', step: 0.5, min: 60, max: 90 },
+    overreaction_pct: { label: '급등락 임계 (%)', type: 'pct', step: 0.005, min: 0.01, max: 0.1 },
+    lookback_bars:    { label: 'Lookback 봉', type: 'int', step: 1, min: 1, max: 10 },
+    ema_long:         { label: 'EMA 장기', type: 'int', step: 1, min: 50, max: 500 },
+  },
+  volatility_expansion_breakout: {
+    enabled:       { label: '활성화', type: 'bool' },
+    tp_ratio:      { label: 'TP Ratio', type: 'num', step: 0.05, min: 0.1, max: 2.0 },
+    sl_offset:     { label: 'SL Offset (%)', type: 'pct', step: 0.001, min: 0.001, max: 0.05 },
+    vol_mult:      { label: '거래량 배수', type: 'num', step: 0.1, min: 1.0, max: 5.0 },
+    squeeze_ratio: { label: 'Squeeze 비율', type: 'num', step: 0.01, min: 1.0, max: 1.5 },
+    expand_ratio:  { label: 'Expand 비율', type: 'num', step: 0.01, min: 1.0, max: 2.0 },
+    bb_period:     { label: 'BB 기간', type: 'int', step: 1, min: 5, max: 50 },
+  },
+  early_trend_capture: {
+    enabled:   { label: '활성화', type: 'bool' },
+    tp_pct:    { label: 'TP (%)', type: 'pct', step: 0.001, min: 0.001, max: 0.2 },
+    sl_pct:    { label: 'SL (%)', type: 'pct', step: 0.001, min: 0.001, max: 0.1 },
+    rsi_low:   { label: 'RSI 하한', type: 'num', step: 1, min: 20, max: 50 },
+    rsi_high:  { label: 'RSI 상한', type: 'num', step: 1, min: 50, max: 80 },
+    vol_mult:  { label: '거래량 배수', type: 'num', step: 0.1, min: 1.0, max: 5.0 },
+    ema_fast:  { label: 'EMA 단기', type: 'int', step: 1, min: 5, max: 50 },
+    ema_slow:  { label: 'EMA 장기', type: 'int', step: 1, min: 20, max: 200 },
+    atr_period:{ label: 'ATR 기간', type: 'int', step: 1, min: 5, max: 30 },
+    atr_mult:  { label: 'ATR 배수', type: 'num', step: 0.05, min: 1.0, max: 3.0 },
+  },
+};
+
+const STRATEGY_DISPLAY_NAMES = {
+  overreaction_reversal:          'Overreaction Reversal',
+  volatility_expansion_breakout:  'Volatility Breakout',
+  early_trend_capture:            'Early Trend',
+};
+
+let _strategyParams = {};
+let _activeStrategyTab = null;
+
+async function loadStrategyParams() {
+  try {
+    const r = await fetch('/api/strategy-params');
+    if (!r.ok) return;
+    _strategyParams = await r.json();
+
+    // 글로벌 파라미터 필드 채우기
+    const g = _strategyParams.global || {};
+    for (const [key, val] of Object.entries(g)) {
+      const el = document.getElementById('gp-' + key);
+      if (el) el.value = val;
+    }
+
+    // 탭 렌더링
+    renderStrategyTabs();
+    if (_activeStrategyTab) renderStrategyParamForm(_activeStrategyTab);
+    else if (Object.keys(STRATEGY_PARAM_META).length > 0) {
+      _activeStrategyTab = Object.keys(STRATEGY_PARAM_META)[0];
+      renderStrategyParamForm(_activeStrategyTab);
+    }
+  } catch (e) {}
+}
+
+function renderStrategyTabs() {
+  const container = document.getElementById('strategy-tabs');
+  if (!container) return;
+  container.innerHTML = '';
+  for (const stratName of Object.keys(STRATEGY_PARAM_META)) {
+    const params = (_strategyParams.strategies || {})[stratName] || {};
+    const enabled = params.enabled !== false;
+    const btn = document.createElement('button');
+    btn.className = 'strategy-tab' + (stratName === _activeStrategyTab ? ' active' : '') + (!enabled ? ' paused' : '');
+    btn.textContent = STRATEGY_DISPLAY_NAMES[stratName] || stratName;
+    if (!enabled) btn.title = '비활성화됨';
+    btn.onclick = () => {
+      _activeStrategyTab = stratName;
+      renderStrategyTabs();
+      renderStrategyParamForm(stratName);
+    };
+    container.appendChild(btn);
+  }
+}
+
+function renderStrategyParamForm(stratName) {
+  const grid = document.getElementById('strategy-param-grid');
+  if (!grid) return;
+  grid.innerHTML = '';
+
+  const meta = STRATEGY_PARAM_META[stratName] || {};
+  const current = Object.assign(
+    {},
+    (_strategyParams.strategies || {})[stratName] || {}
+  );
+
+  for (const [key, m] of Object.entries(meta)) {
+    const val = current[key] !== undefined ? current[key] : '';
+    const item = document.createElement('div');
+    item.className = 'param-item';
+
+    const label = document.createElement('label');
+    label.className = 'param-label';
+    label.textContent = m.label;
+
+    let input;
+    if (m.type === 'bool') {
+      // 활성화 토글: select로 구현
+      input = document.createElement('select');
+      input.className = 'param-input';
+      input.id = 'sp-' + key;
+      const optOn  = new Option('활성화', 'true');
+      const optOff = new Option('비활성화', 'false');
+      input.append(optOn, optOff);
+      input.value = String(val !== '' ? val : true);
+    } else {
+      input = document.createElement('input');
+      input.className = 'param-input';
+      input.id = 'sp-' + key;
+      input.type = 'number';
+      if (m.step)  input.step = m.step;
+      if (m.min !== undefined) input.min = m.min;
+      if (m.max !== undefined) input.max = m.max;
+      // pct 타입: 내부는 소수, 표시도 소수 (0.025 = 2.5%)
+      input.value = val !== '' ? val : '';
+      input.placeholder = val !== '' ? '' : '(기본값 사용)';
+    }
+
+    item.append(label, input);
+    grid.appendChild(item);
+  }
+}
+
+async function saveGlobalParams() {
+  const g = {};
+  const fields = {
+    default_tp_pct:       parseFloat,
+    default_sl_pct:       parseFloat,
+    min_score_execute:    parseInt,
+    max_active_positions: parseInt,
+  };
+  for (const [key, parser] of Object.entries(fields)) {
+    const el = document.getElementById('gp-' + key);
+    if (el && el.value !== '') g[key] = parser(el.value);
+  }
+  if (Object.keys(g).length === 0) return;
+
+  const statusEl = document.getElementById('settings-save-status');
+  try {
+    const r = await fetch('/api/strategy-params/global', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(g),
+    });
+    if (r.ok) {
+      showToast('success', '글로벌 파라미터', '저장됨', 2500);
+      if (statusEl) { statusEl.textContent = '✓ 저장됨'; statusEl.style.color = 'var(--green)'; setTimeout(() => { statusEl.textContent = ''; }, 3000); }
+      await loadStrategyParams();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      showToast('error', '저장 오류', err.detail || '실패', 3000);
+    }
+  } catch (e) {
+    showToast('error', '네트워크 오류', e.message, 3000);
+  }
+}
+
+async function saveStrategyParams() {
+  if (!_activeStrategyTab) return;
+  const meta = STRATEGY_PARAM_META[_activeStrategyTab] || {};
+  const updates = {};
+
+  for (const [key, m] of Object.entries(meta)) {
+    const el = document.getElementById('sp-' + key);
+    if (!el || el.value === '') continue;
+    if (m.type === 'bool')    updates[key] = el.value === 'true';
+    else if (m.type === 'int') updates[key] = parseInt(el.value);
+    else                       updates[key] = parseFloat(el.value);
+  }
+  if (Object.keys(updates).length === 0) return;
+
+  const statusEl = document.getElementById('settings-save-status');
+  try {
+    const r = await fetch('/api/strategy-params/' + _activeStrategyTab, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    if (r.ok) {
+      showToast('success', '전략 파라미터', `${STRATEGY_DISPLAY_NAMES[_activeStrategyTab] || _activeStrategyTab} 저장됨`, 2500);
+      if (statusEl) { statusEl.textContent = '✓ 저장됨'; statusEl.style.color = 'var(--green)'; setTimeout(() => { statusEl.textContent = ''; }, 3000); }
+      await loadStrategyParams();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      showToast('error', '저장 오류', err.detail || '실패', 3000);
+    }
+  } catch (e) {
+    showToast('error', '네트워크 오류', e.message, 3000);
+  }
+}
+
+async function resetStrategyParams() {
+  if (!_activeStrategyTab) return;
+  const name = STRATEGY_DISPLAY_NAMES[_activeStrategyTab] || _activeStrategyTab;
+  if (!confirm(`'${name}' 파라미터를 기본값으로 초기화합니까?`)) return;
+
+  try {
+    const r = await fetch('/api/strategy-params/' + _activeStrategyTab + '/reset', { method: 'POST' });
+    if (r.ok) {
+      showToast('success', '초기화', `${name} 기본값 복원됨`, 2500);
+      await loadStrategyParams();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      showToast('error', '오류', err.detail || '실패', 3000);
+    }
+  } catch (e) {
+    showToast('error', '네트워크 오류', e.message, 3000);
+  }
+}
+
+// 초기 로드
+loadStrategyParams();
+setInterval(loadStrategyParams, 30000);
+
 async function confirmRestart() {
   document.getElementById('restart-modal').style.display = 'none';
   showToast('success', 'Restarting', 'Bot process will restart in ~2s…', 3000);

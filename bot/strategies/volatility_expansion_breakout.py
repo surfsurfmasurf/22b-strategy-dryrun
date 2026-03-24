@@ -97,14 +97,6 @@ class VolatilityExpansionBreakoutStrategy(StrategyBase):
         if pd.isna(bb_bw_cur) or pd.isna(bb_bw_prev) or bb_bw_20_min <= 0:
             return None
 
-        # Squeeze 확인: 최근에 BB가 압축됐는가
-        squeeze_confirmed = bb_bw_prev <= bb_bw_20_min * self.SQUEEZE_RATIO
-        # 폭발 확인: 지금 BB가 팽창하는가
-        expansion_confirmed = bb_bw_prev > 0 and bb_bw_cur > bb_bw_prev * self.EXPAND_RATIO
-
-        if not (squeeze_confirmed and expansion_confirmed):
-            return None
-
         # ─── Range ───────────────────────────────────────────────────────── #
         range_high = float(high.iloc[-(self.RANGE_BARS + 1): -1].max())
         range_low  = float(low.iloc[-(self.RANGE_BARS + 1): -1].min())
@@ -119,11 +111,24 @@ class VolatilityExpansionBreakoutStrategy(StrategyBase):
 
         price_cur = float(close.iloc[-1])
 
+        # 런타임 파라미터
+        vol_mult     = self.get_param("vol_mult",     self.VOL_MULT)
+        tp_ratio     = self.get_param("tp_ratio",     self.TP_RATIO)
+        sl_offset    = self.get_param("sl_offset",    self.SL_OFFSET)
+        squeeze_ratio = self.get_param("squeeze_ratio", self.SQUEEZE_RATIO)
+        expand_ratio  = self.get_param("expand_ratio",  self.EXPAND_RATIO)
+
+        # Squeeze/Expansion 재계산 (런타임 파라미터 반영)
+        squeeze_confirmed   = bb_bw_prev <= bb_bw_20_min * squeeze_ratio
+        expansion_confirmed = bb_bw_prev > 0 and bb_bw_cur > bb_bw_prev * expand_ratio
+        if not (squeeze_confirmed and expansion_confirmed):
+            return None
+
         # ─── BUY ─────────────────────────────────────────────────────────── #
-        if price_cur > range_high and vol_ratio >= self.VOL_MULT:
+        if price_cur > range_high and vol_ratio >= vol_mult:
             confidence = self._clamp(vol_ratio / 4.0, 0.5, 1.0)
-            tp = round(price_cur + range_size * self.TP_RATIO, 8)
-            sl = round(range_high * (1 - self.SL_OFFSET), 8)
+            tp = round(price_cur + range_size * tp_ratio, 8)
+            sl = round(range_high * (1 - sl_offset), 8)
             return Signal(
                 strategy=self.name, symbol=symbol,
                 action="BUY", mode=self._PHASE2_MODE,
@@ -136,10 +141,10 @@ class VolatilityExpansionBreakoutStrategy(StrategyBase):
             )
 
         # ─── SELL ────────────────────────────────────────────────────────── #
-        if price_cur < range_low and vol_ratio >= self.VOL_MULT:
+        if price_cur < range_low and vol_ratio >= vol_mult:
             confidence = self._clamp(vol_ratio / 4.0, 0.5, 1.0)
-            tp = round(price_cur - range_size * self.TP_RATIO, 8)
-            sl = round(range_low * (1 + self.SL_OFFSET), 8)
+            tp = round(price_cur - range_size * tp_ratio, 8)
+            sl = round(range_low * (1 + sl_offset), 8)
             return Signal(
                 strategy=self.name, symbol=symbol,
                 action="SELL", mode=self._PHASE2_MODE,
