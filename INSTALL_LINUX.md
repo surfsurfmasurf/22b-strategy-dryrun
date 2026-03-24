@@ -49,7 +49,7 @@ cd ~/22b-engine
 
 ```bash
 cd ~
-git clone https://github.com/YOUR_USERNAME/straregy-consol.git 22b-engine
+git clone https://github.com/surfsurfmasurf/22b-strategy-dryrun.git 22b-engine
 cd 22b-engine
 ```
 
