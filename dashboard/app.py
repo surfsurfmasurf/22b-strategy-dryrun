@@ -124,7 +124,30 @@ def create_app(
 
     @app.get("/api/snapshot")
     async def api_snapshot():
-        return JSONResponse(store.get_dashboard_snapshot())
+        snapshot = store.get_dashboard_snapshot()
+        snapshot["dry_run_enabled"] = config.dry_run_enabled
+        if config.dry_run_enabled and engine is not None:
+            replay_account = getattr(engine, "_replay_account", None)
+            if replay_account is not None:
+                snapshot["dry_run"] = replay_account.compute_metrics()
+        return JSONResponse(snapshot)
+
+    @app.get("/api/dry-run")
+    async def api_dry_run():
+        """Return dry-run performance metrics (empty if dry-run is not active)."""
+        if not config.dry_run_enabled:
+            return JSONResponse({"enabled": False})
+        replay_account = getattr(engine, "_replay_account", None) if engine else None
+        if replay_account is None:
+            return JSONResponse({"enabled": True, "status": "no_account"})
+        metrics = replay_account.compute_metrics()
+        metrics["enabled"] = True
+        metrics["equity_curve"] = [
+            {"ts": ts, "balance": bal}
+            for ts, bal in replay_account.equity_curve
+        ]
+        metrics["open_count"] = replay_account.open_count()
+        return JSONResponse(metrics)
 
     @app.get("/api/indicators")
     async def api_indicators():

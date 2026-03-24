@@ -54,6 +54,7 @@ from bot.execution.kill_switch import KillSwitch
 from bot.execution.state_machine import OrderStateMachine
 from bot.execution.risk_manager import RiskManager
 from bot.execution.executor import Executor
+from bot.execution.dry_run_executor import DryRunExecutor
 from bot.execution.reconciler import Reconciler
 # Phase 4: AI analysis components (NOT in execution path)
 # Conditional imports — Phase 4 modules may not exist yet in Phase 3 deployments
@@ -139,6 +140,7 @@ class Engine:
         logger.info("=" * 60)
         logger.info("22B Strategy Engine — Phase 3 (+ Phase 4 if available)")
         logger.info("System mode: %s", self._config.system_mode)
+        logger.info("Dry-run mode: %s", self._config.dry_run_enabled)
         logger.info("AI enabled: %s", getattr(self._config, "ai_enabled", False))
         logger.info("Validation dataset mode: %s", self._config.validation_dataset_enabled)
         logger.info("Validation replay mode: %s", self._config.validation_replay_enabled)
@@ -223,7 +225,24 @@ class Engine:
             len(self._strategy_manager.get_strategy_list()),
         )
 
-        # Inject replay_account into PaperRecorder if replay is active
+        # Dry-run mode: initialize ReplayAccount for live data simulation
+        dry_run_mode = self._config.dry_run_enabled and not offline_validation_mode
+        if dry_run_mode:
+            self._replay_account = ReplayAccount(
+                initial_balance=self._config.dry_run_initial_balance,
+                position_size_pct=self._config.dry_run_position_size_pct,
+                fee_rate=self._config.dry_run_fee_rate,
+                slippage_pct=self._config.dry_run_slippage_pct,
+            )
+            logger.info(
+                "Dry-run mode: ReplayAccount initialized (balance=%.2f, size_pct=%.1f%%, fee=%.4f%%, slip=%.4f%%)",
+                self._config.dry_run_initial_balance,
+                self._config.dry_run_position_size_pct * 100,
+                self._config.dry_run_fee_rate * 100,
+                self._config.dry_run_slippage_pct * 100,
+            )
+
+        # Inject replay_account into PaperRecorder if replay or dry-run is active
         if self._replay_account is not None:
             self._strategy_manager.recorder._replay_account = self._replay_account
             logger.info("ReplayAccount injected into PaperRecorder.")
@@ -241,8 +260,19 @@ class Engine:
         self._risk_manager = RiskManager(self._store)
         logger.info("RiskManager initialized.")
 
-        # 10. Phase 3: Executor
-        if not offline_validation_mode:
+        # 10. Phase 3: Executor (or DryRunExecutor)
+        if dry_run_mode:
+            self._executor = DryRunExecutor(
+                config=self._config,
+                store=self._store,
+                state_machine=self._state_machine,
+                kill_switch=self._kill_switch,
+                replay_account=self._replay_account,
+            )
+            await self._executor.start()
+            self._kill_switch.set_executor(self._executor)
+            logger.info("DryRunExecutor initialized (live data, simulated execution).")
+        elif not offline_validation_mode:
             self._executor = Executor(
                 config=self._config,
                 store=self._store,
@@ -253,7 +283,7 @@ class Engine:
             self._kill_switch.set_executor(self._executor)
             logger.info("Executor initialized. Testnet=%s", self._config.binance_testnet)
 
-            # 11. Phase 3: Reconciler
+            # 11. Phase 3: Reconciler (skip in dry-run — no real positions to reconcile)
             self._reconciler = Reconciler(
                 store=self._store,
                 executor=self._executor,
@@ -313,7 +343,13 @@ class Engine:
                 pass  # Windows does not support add_signal_handler for all signals
 
         # Initial balance fetch
-        if not offline_validation_mode:
+        if dry_run_mode:
+            self._store.set_account_balance(self._config.dry_run_initial_balance)
+            logger.info(
+                "Dry-run mode: virtual balance set to %.2f USDT",
+                self._config.dry_run_initial_balance,
+            )
+        elif not offline_validation_mode:
             await self._refresh_balance()
         else:
             logger.info("Offline validation dataset mode enabled — skipping initial live balance fetch.")
@@ -336,6 +372,7 @@ class Engine:
     async def _main_loop(self) -> None:
         """Run regime detection + strategy evaluation on a schedule until shutdown."""
         last_regime = "UNKNOWN"
+        last_dry_run_report: float = time.time()
 
         while not self._shutdown_event.is_set():
             try:
@@ -343,7 +380,15 @@ class Engine:
 
                 # --- Phase 3: Periodic balance refresh ---
                 now = time.time()
-                if now - self._last_balance_refresh >= BALANCE_REFRESH_INTERVAL:
+                if self._config.dry_run_enabled and self._replay_account is not None:
+                    # Dry-run: sync virtual balance to store
+                    self._store.set_account_balance(self._replay_account.balance)
+                    # Periodic dry-run report
+                    report_interval = self._config.dry_run_report_interval_min * 60
+                    if now - last_dry_run_report >= report_interval:
+                        self._log_dry_run_report()
+                        last_dry_run_report = now
+                elif now - self._last_balance_refresh >= BALANCE_REFRESH_INTERVAL:
                     await self._refresh_balance()
 
             except Exception as exc:
@@ -356,6 +401,10 @@ class Engine:
                 )
             except asyncio.TimeoutError:
                 pass  # normal — keep looping
+
+        # Final dry-run report on shutdown
+        if self._config.dry_run_enabled and self._replay_account is not None:
+            self._log_dry_run_report(final=True)
 
         await self._shutdown()
 
@@ -454,7 +503,10 @@ class Engine:
                         len(signals), len(actionable),
                     )
 
-                    if (self._store.get_system_mode() == "ACTIVE"
+                    # Dry-run: route all actionable signals through DryRunExecutor
+                    if self._config.dry_run_enabled and self._executor is not None:
+                        await self._execute_dry_run_signals(actionable, result)
+                    elif (self._store.get_system_mode() == "ACTIVE"
                             and not self._kill_switch.is_active):
                         await self._execute_live_signals(actionable, result)
 
@@ -519,6 +571,52 @@ class Engine:
                     signal.action, signal.symbol, exc,
                 )
 
+    async def _execute_dry_run_signals(self, signals, regime: dict) -> None:
+        """
+        Execute actionable signals through the DryRunExecutor.
+        Accepts both PAPER and LIVE mode signals — all are simulated.
+        """
+        balance = self._store.get_account_balance()
+        if balance <= 0:
+            logger.warning("[Engine] Dry-run balance=0 — cannot simulate signals.")
+            return
+
+        for sig in signals:
+            if sig.action not in ("BUY", "SELL"):
+                continue
+
+            try:
+                # Risk check (same pipeline — validates sizing)
+                risk_result = self._risk_manager.check(sig, balance)
+
+                if not risk_result.passed:
+                    logger.debug(
+                        "[DryRun] Risk check FAILED for %s %s: %s",
+                        sig.action, sig.symbol, risk_result.reason,
+                    )
+                    continue
+
+                # Submit to DryRunExecutor (simulated fill)
+                order_result = await self._executor.submit_order(
+                    signal=sig,
+                    qty=risk_result.position_size,
+                )
+
+                if "error" not in order_result:
+                    logger.info(
+                        "[DryRun] Simulated order: %s %s qty=%.6f price=%.4f",
+                        sig.action,
+                        sig.symbol,
+                        order_result.get("filled_qty", 0),
+                        order_result.get("avg_price", 0),
+                    )
+
+            except Exception as exc:
+                logger.error(
+                    "[DryRun] Error simulating signal %s %s: %s",
+                    sig.action, sig.symbol, exc,
+                )
+
     async def _refresh_balance(self) -> None:
         """Fetch and cache account balance from Binance."""
         if self._executor is None:
@@ -531,6 +629,73 @@ class Engine:
             self._last_balance_refresh = time.time()
         except Exception as exc:
             logger.warning("[Engine] Balance refresh error: %s", exc)
+
+    def _log_dry_run_report(self, final: bool = False) -> None:
+        """Log a periodic or final dry-run performance summary."""
+        if self._replay_account is None:
+            return
+        metrics = self._replay_account.compute_metrics()
+        prefix = "FINAL DRY-RUN REPORT" if final else "DRY-RUN STATUS"
+        elapsed = time.time() - self._start_time
+        elapsed_h = elapsed / 3600
+
+        logger.info("=" * 60)
+        logger.info("[%s] Elapsed: %.1f hours", prefix, elapsed_h)
+        logger.info(
+            "[%s] Balance: %.2f → %.2f USDT (return: %.2f%%)",
+            prefix,
+            metrics.get("initial_balance", 0),
+            metrics.get("final_balance", 0),
+            metrics.get("total_return_pct", 0),
+        )
+        logger.info(
+            "[%s] Trades: %d (W:%d / L:%d)  WinRate: %.1f%%",
+            prefix,
+            metrics.get("trade_count", 0),
+            metrics.get("win_count", 0),
+            metrics.get("loss_count", 0),
+            metrics.get("win_rate", 0) * 100,
+        )
+        logger.info(
+            "[%s] PnL: %.2f USDT  MDD: %.2f%%  Sharpe: %.3f",
+            prefix,
+            metrics.get("total_pnl_usdt", 0),
+            metrics.get("mdd_pct", 0),
+            metrics.get("sharpe_ratio", 0),
+        )
+        logger.info(
+            "[%s] Fees: %.4f USDT  Slippage: %.4f USDT",
+            prefix,
+            metrics.get("total_fee_usdt", 0),
+            metrics.get("total_slippage_usdt", 0),
+        )
+        per_strategy = metrics.get("per_strategy", {})
+        for sname, sdata in per_strategy.items():
+            logger.info(
+                "[%s] Strategy '%s': trades=%d  WR=%.1f%%  PnL=%.2f USDT",
+                prefix,
+                sname,
+                sdata.get("trade_count", 0),
+                sdata.get("win_rate", 0) * 100,
+                sdata.get("total_pnl_usdt", 0),
+            )
+        logger.info("=" * 60)
+
+        # Send Telegram notification for final report
+        if final and self._telegram is not None:
+            try:
+                summary = (
+                    f"🏁 *Dry-Run 최종 리포트*\n"
+                    f"⏱ 경과: {elapsed_h:.1f}h\n"
+                    f"💰 잔고: {metrics.get('initial_balance', 0):.0f} → {metrics.get('final_balance', 0):.0f} USDT\n"
+                    f"📈 수익률: {metrics.get('total_return_pct', 0):.2f}%\n"
+                    f"📊 거래: {metrics.get('trade_count', 0)}건 (승률 {metrics.get('win_rate', 0) * 100:.1f}%)\n"
+                    f"📉 MDD: {metrics.get('mdd_pct', 0):.2f}%\n"
+                    f"💸 수수료: {metrics.get('total_fee_usdt', 0):.4f} USDT"
+                )
+                self._telegram.send_message(summary)
+            except Exception:
+                pass
 
     async def _telegram_command_loop(self) -> None:
         """

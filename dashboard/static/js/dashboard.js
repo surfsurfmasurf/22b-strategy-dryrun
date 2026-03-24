@@ -2044,6 +2044,59 @@ async function resetStrategyParams() {
 loadStrategyParams();
 setInterval(loadStrategyParams, 30000);
 
+// ============================================================
+// Dry-Run Performance Panel
+// ============================================================
+async function refreshDryRunPanel() {
+  try {
+    const res = await fetch('/api/dry-run');
+    const data = await res.json();
+    const panel = document.getElementById('panel-dry-run');
+    if (!panel) return;
+    if (!data.enabled) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+
+    const tc = data.trade_count || 0;
+    const setText = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = val;
+    };
+
+    setText('dryrun-status', tc > 0 ? `${tc} trades completed` : 'Waiting for trades...');
+    setText('dryrun-balance', tc > 0 ? `$${(data.final_balance || 0).toFixed(2)}` : `$${(data.initial_balance || 0).toFixed(2)}`);
+
+    const ret = data.total_return_pct || 0;
+    const retEl = document.getElementById('dryrun-return');
+    if (retEl) {
+      retEl.textContent = `${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%`;
+      retEl.style.color = ret >= 0 ? '#22c55e' : '#ef4444';
+    }
+
+    setText('dryrun-trades', `${data.win_count || 0}W / ${data.loss_count || 0}L`);
+    setText('dryrun-winrate', tc > 0 ? `${(data.win_rate * 100).toFixed(1)}%` : '--');
+
+    const pnl = data.total_pnl_usdt || 0;
+    const pnlEl = document.getElementById('dryrun-pnl');
+    if (pnlEl) {
+      pnlEl.textContent = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}`;
+      pnlEl.style.color = pnl >= 0 ? '#22c55e' : '#ef4444';
+    }
+
+    setText('dryrun-mdd', tc > 0 ? `${(data.mdd_pct || 0).toFixed(2)}%` : '--');
+    setText('dryrun-pf', data.profit_factor ? data.profit_factor.toFixed(2) : '--');
+    setText('dryrun-fees', tc > 0 ? `$${(data.total_fee_usdt || 0).toFixed(4)}` : '--');
+  } catch (e) {
+    // dry-run endpoint not available
+  }
+}
+
+// Initial load + periodic refresh for dry-run
+refreshDryRunPanel();
+setInterval(refreshDryRunPanel, 15000);
+
 async function confirmRestart() {
   document.getElementById('restart-modal').style.display = 'none';
   showToast('success', 'Restarting', 'Bot process will restart in ~2s…', 3000);

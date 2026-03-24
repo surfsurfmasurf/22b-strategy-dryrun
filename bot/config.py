@@ -111,6 +111,14 @@ class Config:
     daily_review_hour: int = field(default_factory=lambda: _get_int("DAILY_REVIEW_HOUR", 22))
     ai_enabled: bool = field(default_factory=lambda: _get_bool("AI_ENABLED", True))
 
+    # Dry-run mode (live data + simulated execution)
+    dry_run_enabled: bool = field(default_factory=lambda: _get_bool("DRY_RUN_ENABLED", False))
+    dry_run_initial_balance: float = field(default_factory=lambda: _get_float("DRY_RUN_INITIAL_BALANCE", 10_000.0))
+    dry_run_position_size_pct: float = field(default_factory=lambda: _get_float("DRY_RUN_POSITION_SIZE_PCT", 0.10))
+    dry_run_fee_rate: float = field(default_factory=lambda: _get_float("DRY_RUN_FEE_RATE", 0.0004))
+    dry_run_slippage_pct: float = field(default_factory=lambda: _get_float("DRY_RUN_SLIPPAGE_PCT", 0.0005))
+    dry_run_report_interval_min: int = field(default_factory=lambda: _get_int("DRY_RUN_REPORT_INTERVAL_MIN", 60))
+
     # Replay simulation (backtest)
     replay_initial_balance: float = field(default_factory=lambda: _get_float("REPLAY_INITIAL_BALANCE", 10_000.0))
     replay_position_size_pct: float = field(default_factory=lambda: _get_float("REPLAY_POSITION_SIZE_PCT", 0.10))
@@ -166,6 +174,18 @@ class Config:
             logger.warning(
                 "SYSTEM_MODE '%s' is not valid; falling back to OBSERVE",
                 self.system_mode,
+            )
+            self.system_mode = "OBSERVE"
+
+        if self.dry_run_enabled and self.validation_dataset_enabled:
+            logger.warning(
+                "DRY_RUN_ENABLED and VALIDATION_DATASET_ENABLED are mutually exclusive; disabling dry-run"
+            )
+            self.dry_run_enabled = False
+
+        if self.dry_run_enabled and self.system_mode == "ACTIVE":
+            logger.warning(
+                "DRY_RUN_ENABLED with SYSTEM_MODE=ACTIVE — forcing OBSERVE for safety"
             )
             self.system_mode = "OBSERVE"
 
