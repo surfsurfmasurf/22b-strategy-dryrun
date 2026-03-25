@@ -33,13 +33,14 @@ class Regime(str, Enum):
 
 
 # Strategies allowed per regime
+# Categories: reversal, breakout, trend, mean_reversion, hedge, range, volatility, micro, multi, regime
 REGIME_ALLOW_TABLE: Dict[str, List[str]] = {
-    Regime.BTC_BULLISH: ["trend", "breakout", "multi"],
-    Regime.BTC_BEARISH: ["mean_reversion", "hedge"],
-    Regime.BTC_SIDEWAYS: ["mean_reversion", "range"],
-    Regime.ALT_ROTATION: ["regime", "trend"],
-    Regime.HIGH_VOLATILITY: ["volatility", "micro"],
-    Regime.LOW_VOLATILITY: ["breakout"],
+    Regime.BTC_BULLISH: ["trend", "breakout", "multi", "reversal"],
+    Regime.BTC_BEARISH: ["mean_reversion", "hedge", "reversal", "trend"],
+    Regime.BTC_SIDEWAYS: ["mean_reversion", "range", "reversal", "breakout"],
+    Regime.ALT_ROTATION: ["regime", "trend", "reversal", "breakout"],
+    Regime.HIGH_VOLATILITY: ["volatility", "micro", "reversal"],
+    Regime.LOW_VOLATILITY: ["breakout", "trend", "reversal"],
     Regime.EVENT_RISK: [],
     Regime.UNKNOWN: [],
 }
@@ -221,10 +222,10 @@ class RegimeDetector:
             return self._make_result(ts, Regime.HIGH_VOLATILITY, indicators)
 
         # BTC_BULLISH
-        # Conditions: EMA50 below price (price above EMA50), 24H ret > 0, funding < 0.05%, atr_pct <= 5
+        # Conditions: price above EMA50, 24H ret >= -0.3% (relaxed from >0), funding < 0.05%, atr_pct <= 5
         if (
             btc_price > ema50
-            and ret_24h > 0.0
+            and ret_24h >= -0.3
             and funding < 0.05
             and atr_pct <= 5.0
         ):
@@ -232,23 +233,19 @@ class RegimeDetector:
             return self._make_result(ts, Regime.BTC_BULLISH, indicators)
 
         # BTC_BEARISH
-        # Conditions: EMA50 above price (price below EMA50), 24H ret < -1, not (1H ret > 3)
+        # Conditions: price below EMA50, 24H ret < -0.5% (relaxed from -1%), not (1H ret > 3)
         if (
             btc_price < ema50
-            and ret_24h < -1.0
+            and ret_24h < -0.5
             and ret_1h <= 3.0
         ):
             indicators = self._build_indicators(btc_4h, btc_1h, funding)
             return self._make_result(ts, Regime.BTC_BEARISH, indicators)
 
         # BTC_SIDEWAYS
-        # Conditions: 24H ret in [-1, +1], atr_pct < 3, BB bandwidth < 70% of avg
-        bb_below_avg = (
-            bb_bw < 0.7 * bb_bw_avg
-            if bb_bw_avg and bb_bw_avg > 0
-            else True
-        )
-        if -1.0 <= ret_24h <= 1.0 and atr_pct < 3.0 and bb_below_avg:
+        # Conditions: 24H ret in [-1.5, +1.5], atr_pct < 3.5
+        # BB bandwidth condition relaxed: use as tiebreaker, not hard requirement
+        if -1.5 <= ret_24h <= 1.5 and atr_pct < 3.5:
             indicators = self._build_indicators(btc_4h, btc_1h, funding)
             return self._make_result(ts, Regime.BTC_SIDEWAYS, indicators)
 
@@ -258,13 +255,16 @@ class RegimeDetector:
         # For now: skip if no signal matched above
 
         # LOW_VOLATILITY
-        if atr_pct < 2.0 and bb_bw_avg and bb_bw < 0.5 * bb_bw_avg:
+        if atr_pct < 2.0:
             indicators = self._build_indicators(btc_4h, btc_1h, funding)
             return self._make_result(ts, Regime.LOW_VOLATILITY, indicators)
 
-        # No rule matched
+        # Fallback: classify based on price vs EMA50 (never stay UNKNOWN if we have data)
         indicators = self._build_indicators(btc_4h, btc_1h, funding)
-        return self._make_result(ts, Regime.UNKNOWN, indicators)
+        if btc_price >= ema50:
+            return self._make_result(ts, Regime.BTC_BULLISH, indicators)
+        else:
+            return self._make_result(ts, Regime.BTC_BEARISH, indicators)
 
     # ---------------------------------------------------------------------- #
     # Private helpers
