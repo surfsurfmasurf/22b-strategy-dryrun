@@ -102,14 +102,17 @@ class Config:
         default_factory=lambda: _get("TUNNEL_CLOUDFLARED_PATH", "./cloudflared.exe")
     )
 
-    # OpenClaw AI (Phase 4)
-    openclaw_base_url: str = field(default_factory=lambda: _get("OPENCLAW_BASE_URL", "http://127.0.0.1:18789"))
-    openclaw_token: str = field(default_factory=lambda: _get("OPENCLAW_TOKEN", ""))
-    openclaw_agent_id: str = field(default_factory=lambda: _get("OPENCLAW_AGENT_ID", "main"))
+    # AI (Phase 4) — Anthropic Claude API direct
+    anthropic_api_key: str = field(default_factory=lambda: _get("ANTHROPIC_API_KEY", ""))
+    anthropic_model: str = field(default_factory=lambda: _get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"))
+    ai_enabled: bool = field(default_factory=lambda: _get_bool("AI_ENABLED", True))
     weekly_review_day: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_DAY", 6))
     weekly_review_hour: int = field(default_factory=lambda: _get_int("WEEKLY_REVIEW_HOUR", 0))
     daily_review_hour: int = field(default_factory=lambda: _get_int("DAILY_REVIEW_HOUR", 22))
-    ai_enabled: bool = field(default_factory=lambda: _get_bool("AI_ENABLED", True))
+    # Legacy OpenClaw (kept for backward compat, not used if ANTHROPIC_API_KEY is set)
+    openclaw_base_url: str = field(default_factory=lambda: _get("OPENCLAW_BASE_URL", "http://127.0.0.1:18789"))
+    openclaw_token: str = field(default_factory=lambda: _get("OPENCLAW_TOKEN", ""))
+    openclaw_agent_id: str = field(default_factory=lambda: _get("OPENCLAW_AGENT_ID", "main"))
 
     # Dry-run mode (live data + simulated execution)
     dry_run_enabled: bool = field(default_factory=lambda: _get_bool("DRY_RUN_ENABLED", False))

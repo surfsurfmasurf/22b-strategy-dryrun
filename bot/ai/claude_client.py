@@ -1,9 +1,9 @@
 """
 AI client for the 22B Strategy Engine — Phase 4.
 
-Uses OpenClaw agent via OpenAI-compatible HTTP API.
-  Base URL : http://127.0.0.1:18789/v1  (default)
-  Model    : openclaw:main  (or configured OPENCLAW_AGENT_ID)
+Supports two backends (auto-selected):
+  1. Anthropic Claude API direct  (preferred — ANTHROPIC_API_KEY)
+  2. OpenClaw proxy               (fallback  — OPENCLAW_BASE_URL)
 
 IMPORTANT:
   - AI is NEVER used for execution decisions.
@@ -29,41 +29,86 @@ DEFAULT_SYSTEM = (
 
 class ClaudeClient:
     """
-    AI client that calls OpenClaw agent via OpenAI-compatible API.
+    AI client with automatic backend selection.
 
-    Graceful degradation:
-      - If OpenClaw is unreachable, is_available() returns False.
-      - All analyze() calls return a placeholder string instead of raising.
+    Priority:
+      1. ANTHROPIC_API_KEY set → use anthropic SDK directly
+      2. OPENCLAW_BASE_URL set → use OpenAI-compatible proxy
+      3. Neither → graceful degradation (is_available = False)
     """
 
-    def __init__(self, base_url: str, token: str, agent_id: str, ai_enabled: bool = True) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._token = token
-        self._agent_id = agent_id
+    def __init__(
+        self,
+        api_key: str = "",
+        model: str = "claude-sonnet-4-20250514",
+        ai_enabled: bool = True,
+        # Legacy OpenClaw params (backward compat)
+        base_url: str = "",
+        token: str = "",
+        agent_id: str = "main",
+    ) -> None:
         self._ai_enabled = ai_enabled
-        self._client = None
+        self._model = model
+        self._backend = "none"  # "anthropic" | "openclaw" | "none"
+
+        # SDK clients
+        self._anthropic_client = None
+        self._openai_client = None
+        self._agent_id = agent_id
 
         if not self._ai_enabled:
             logger.info("AI_ENABLED=false — AI features disabled")
             return
 
-        try:
-            from openai import AsyncOpenAI
-            self._client = AsyncOpenAI(
-                api_key=self._token or "no-key",
-                base_url=f"{self._base_url}/v1",
-            )
-            logger.info(
-                "ClaudeClient (OpenClaw) initialised — base=%s agent=%s",
-                self._base_url, self._agent_id,
-            )
-        except ImportError:
-            logger.warning("openai package not installed — AI features disabled. Run: pip install openai")
-        except Exception as exc:
-            logger.warning("ClaudeClient init failed: %s", exc)
+        # --- Try Anthropic SDK first ---
+        if api_key:
+            try:
+                import anthropic
+                self._anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
+                self._backend = "anthropic"
+                logger.info(
+                    "ClaudeClient initialized — backend=Anthropic API, model=%s",
+                    self._model,
+                )
+                return
+            except ImportError:
+                logger.warning(
+                    "anthropic package not installed. Run: pip install anthropic"
+                )
+            except Exception as exc:
+                logger.warning("Anthropic SDK init failed: %s", exc)
+
+        # --- Fallback: OpenClaw proxy ---
+        if base_url:
+            try:
+                from openai import AsyncOpenAI
+                self._openai_client = AsyncOpenAI(
+                    api_key=token or "no-key",
+                    base_url=f"{base_url.rstrip('/')}/v1",
+                )
+                self._backend = "openclaw"
+                logger.info(
+                    "ClaudeClient initialized — backend=OpenClaw, base=%s agent=%s",
+                    base_url, agent_id,
+                )
+                return
+            except ImportError:
+                logger.warning(
+                    "openai package not installed for OpenClaw fallback. Run: pip install openai"
+                )
+            except Exception as exc:
+                logger.warning("OpenClaw init failed: %s", exc)
+
+        logger.warning(
+            "No AI backend available. Set ANTHROPIC_API_KEY or OPENCLAW_BASE_URL."
+        )
+
+    @property
+    def backend(self) -> str:
+        return self._backend
 
     async def is_available(self) -> bool:
-        return self._client is not None and self._ai_enabled
+        return self._ai_enabled and self._backend != "none"
 
     async def analyze(
         self,
@@ -72,25 +117,52 @@ class ClaudeClient:
         max_tokens: int = MAX_TOKENS_REGIME,
     ) -> str:
         if not await self.is_available():
-            return "[AI analysis unavailable — OpenClaw not connected or AI_ENABLED=false]"
+            return "[AI analysis unavailable — no API key configured or AI_ENABLED=false]"
 
         system_prompt = system or DEFAULT_SYSTEM
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": prompt},
-        ]
 
         try:
-            resp = await self._client.chat.completions.create(
-                model=f"openclaw:{self._agent_id}",
-                messages=messages,
-                max_tokens=max_tokens,
-            )
-            content = resp.choices[0].message.content
-            return content or "[AI returned empty response]"
+            if self._backend == "anthropic":
+                return await self._call_anthropic(prompt, system_prompt, max_tokens)
+            else:
+                return await self._call_openclaw(prompt, system_prompt, max_tokens)
         except Exception as exc:
-            logger.error("OpenClaw API call failed: %s", exc)
+            logger.error("AI API call failed (%s): %s", self._backend, exc)
             return f"[AI analysis temporarily unavailable: {type(exc).__name__}]"
+
+    async def _call_anthropic(
+        self, prompt: str, system: str, max_tokens: int
+    ) -> str:
+        """Call Anthropic Claude API directly."""
+        resp = await self._anthropic_client.messages.create(
+            model=self._model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        # Extract text from content blocks
+        text_parts = []
+        for block in resp.content:
+            if hasattr(block, "text"):
+                text_parts.append(block.text)
+        result = "\n".join(text_parts)
+        return result or "[AI returned empty response]"
+
+    async def _call_openclaw(
+        self, prompt: str, system: str, max_tokens: int
+    ) -> str:
+        """Call OpenClaw proxy via OpenAI-compatible API."""
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        resp = await self._openai_client.chat.completions.create(
+            model=f"openclaw:{self._agent_id}",
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+        content = resp.choices[0].message.content
+        return content or "[AI returned empty response]"
 
     async def analyze_regime(self, prompt: str) -> str:
         return await self.analyze(prompt, max_tokens=MAX_TOKENS_REGIME)

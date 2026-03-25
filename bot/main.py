@@ -304,19 +304,22 @@ class Engine:
         if _PHASE4_AVAILABLE and ClaudeClient is not None:
             ai_enabled = getattr(self._config, "ai_enabled", True)
             self._claude = ClaudeClient(
-                base_url=getattr(self._config, "openclaw_base_url", "http://127.0.0.1:18789"),
+                api_key=getattr(self._config, "anthropic_api_key", ""),
+                model=getattr(self._config, "anthropic_model", "claude-sonnet-4-20250514"),
+                ai_enabled=ai_enabled,
+                # Legacy OpenClaw fallback
+                base_url=getattr(self._config, "openclaw_base_url", ""),
                 token=getattr(self._config, "openclaw_token", ""),
                 agent_id=getattr(self._config, "openclaw_agent_id", "main"),
-                ai_enabled=ai_enabled,
             )
             self._regime_interpreter = RegimeInterpreter(self._claude)
             self._daily_reviewer = DailyReviewer(self._store, self._telegram)
             self._weekly_reviewer = WeeklyReviewer(self._store, self._claude, self._telegram)
             logger.info(
-                "Phase 4 AI components initialized (ai_enabled=%s, openclaw=%s agent=%s)",
+                "Phase 4 AI components initialized (ai_enabled=%s, backend=%s, model=%s)",
                 ai_enabled,
-                getattr(self._config, "openclaw_base_url", "http://127.0.0.1:18789"),
-                getattr(self._config, "openclaw_agent_id", "main"),
+                self._claude.backend,
+                getattr(self._config, "anthropic_model", "claude-sonnet-4-20250514"),
             )
             # 14. Review scheduler (Phase 4)
             asyncio.create_task(self._schedule_reviews(), name="review_scheduler")
